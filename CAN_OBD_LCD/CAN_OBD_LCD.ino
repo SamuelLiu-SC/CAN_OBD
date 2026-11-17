@@ -2,8 +2,35 @@
 #include <Wire.h>
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_I2Cexp.h>
+#include <Arduino_GFX_Library.h>
 
 hd44780_I2Cexp lcd;
+
+// GC9A01 240x240 round TFT, driven over software SPI (D2-D7 are not the
+// board's hardware SPI pins).
+//   SCL (SCK)  -> D7     RES (RST) -> D5     CS  -> D3
+//   SDA (MOSI) -> D6     DC        -> D4     BLK -> D2
+constexpr uint8_t TFT_SCLK = 7;
+constexpr uint8_t TFT_MOSI = 6;
+constexpr uint8_t TFT_RST = 5;
+constexpr uint8_t TFT_DC = 4;
+constexpr uint8_t TFT_CS = 3;
+constexpr uint8_t TFT_BLK = 2;
+
+Arduino_DataBus *tftBus = new Arduino_SWSPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI);
+Arduino_GFX *tft = new Arduino_GC9A01(tftBus, TFT_RST, /*rotation=*/0, /*ips=*/true);
+bool tftReady = false;
+
+// Gauge layout: a square region centered on the round screen, sized to stay
+// clear of the circular bezel (240x240 panel, usable square ~170x170).
+constexpr int16_t GAUGE_CENTER_X = 120;
+constexpr int16_t GAUGE_RECT_X = 30;
+constexpr int16_t GAUGE_RECT_Y = 50;
+constexpr int16_t GAUGE_RECT_W = 180;
+constexpr int16_t GAUGE_RECT_H = 140;
+constexpr int16_t GAUGE_LABEL_Y = 65;
+constexpr int16_t GAUGE_VALUE_Y = 105;
+constexpr int16_t GAUGE_UNIT_Y = 165;
 
 constexpr uint32_t REQUEST_ID = 0x7DF;
 constexpr uint8_t PID_RPM = 0x0C;
@@ -47,6 +74,14 @@ uint32_t lastPollAt = 0;
 bool awaitingResponse = false;
 bool txError = false;
 
+// Tracks what the gauge last rendered so it only redraws when something
+// actually changes, since a full-rect TFT redraw is much slower than an LCD
+// row update.
+size_t lastGaugeIndex = READING_COUNT;
+int lastGaugeValue = 0;
+bool lastGaugeValid = false;
+bool lastGaugeError = false;
+
 void printLine(uint8_t row, const char *text) {
   lcd.setCursor(0, row);
   uint8_t count = 0;
@@ -75,6 +110,64 @@ void refreshDisplay(uint32_t now) {
     }
     printLine(row, line);
   }
+}
+
+void gaugeCenterPrint(const char *text, int16_t y) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  tft->getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  tft->setCursor(GAUGE_CENTER_X - w / 2, y);
+  tft->print(text);
+}
+
+void drawGauge(const Reading &reading, bool valid, bool error) {
+  tft->fillRect(GAUGE_RECT_X, GAUGE_RECT_Y, GAUGE_RECT_W, GAUGE_RECT_H, RGB565_BLACK);
+
+  if (error) {
+    tft->setTextColor(RGB565_RED);
+    tft->setTextSize(2);
+    gaugeCenterPrint("CAN TX", GAUGE_LABEL_Y);
+    gaugeCenterPrint("ERROR", GAUGE_VALUE_Y);
+    return;
+  }
+
+  tft->setTextColor(RGB565_WHITE);
+  tft->setTextSize(2);
+  gaugeCenterPrint(reading.label, GAUGE_LABEL_Y);
+
+  char valueText[12];
+  if (valid) {
+    snprintf(valueText, sizeof(valueText), "%d", reading.value);
+  } else {
+    snprintf(valueText, sizeof(valueText), "--");
+  }
+  tft->setTextSize(5);
+  gaugeCenterPrint(valueText, GAUGE_VALUE_Y);
+
+  if (reading.unit[0] != '\0') {
+    tft->setTextSize(2);
+    gaugeCenterPrint(reading.unit, GAUGE_UNIT_Y);
+  }
+}
+
+void updateGauge(uint32_t now) {
+  if (!tftReady) {
+    return;
+  }
+
+  const Reading &reading = readings[topRow];
+  const bool valid = reading.valid && now - reading.updatedAt <= VALUE_TIMEOUT_MS;
+
+  if (topRow == lastGaugeIndex && valid == lastGaugeValid &&
+      (!valid || reading.value == lastGaugeValue) && txError == lastGaugeError) {
+    return;
+  }
+
+  drawGauge(reading, valid, txError);
+  lastGaugeIndex = topRow;
+  lastGaugeValid = valid;
+  lastGaugeValue = reading.value;
+  lastGaugeError = txError;
 }
 
 void requestPid(size_t readingIndex, uint32_t now) {
@@ -146,6 +239,17 @@ void setup() {
   printLine(0, "OBD-II starting");
   printLine(1, "");
 
+  // GC9A01 is a supplemental gauge display; failure here doesn't stop OBD
+  // polling or the primary LCD, so it's non-fatal.
+  pinMode(TFT_BLK, OUTPUT);
+  digitalWrite(TFT_BLK, HIGH);
+  tftReady = tft->begin();
+  if (!tftReady) {
+    Serial.println("GC9A01 initialization failed");
+  } else {
+    tft->fillScreen(RGB565_BLACK);
+  }
+
   if (!CAN.begin(CanBitRate::BR_500k)) {
     printLine(0, "CAN init failed");
     printLine(1, "Check setup");
@@ -192,5 +296,6 @@ void loop() {
   if (now - lastDisplayAt >= 250) {
     lastDisplayAt = now;
     refreshDisplay(now);
+    updateGauge(now);
   }
 }
