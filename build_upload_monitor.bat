@@ -1,7 +1,13 @@
 @echo off
 setlocal
 
-if not defined ARDUINO_CLI set "ARDUINO_CLI=E:\arduino\cli\arduino-cli_1.5.2-rc.1_Windows_64bit\arduino-cli.exe"
+if not defined ARDUINO_CLI if exist "C:\arduino-cli_1.5.1_Windows_64bit\arduino-cli.exe" set "ARDUINO_CLI=C:\arduino-cli_1.5.1_Windows_64bit\arduino-cli.exe"
+if not defined ARDUINO_CLI if exist "E:\arduino\cli\arduino-cli_1.5.2-rc.1_Windows_64bit\arduino-cli.exe" set "ARDUINO_CLI=E:\arduino\cli\arduino-cli_1.5.2-rc.1_Windows_64bit\arduino-cli.exe"
+if not defined ARDUINO_CLI (
+  echo Arduino CLI not found in either configured location. 1>&2
+  echo Set ARDUINO_CLI to the full path of arduino-cli.exe. 1>&2
+  exit /b 1
+)
 set "FQBN=arduino:renesas_uno:unor4wifi"
 set "SKETCH=%~dp0CAN_OBD_LCD"
 set "PORT=%~1"
