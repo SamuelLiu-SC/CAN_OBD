@@ -1,6 +1,7 @@
 #include <Arduino_CAN.h>
 #include <Wire.h>
 #include <math.h>
+#include <string.h>
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_I2Cexp.h>
 #include <Arduino_GFX_Library.h>
@@ -220,8 +221,8 @@ void updateGaugeIndicator(const Reading &reading, bool valid) {
   gaugeIndicatorDrawn = true;
 }
 
-void drawGauge(const Reading &reading, bool valid) {
-  tft->fillRect(GAUGE_RECT_X, GAUGE_RECT_Y, GAUGE_RECT_W, GAUGE_RECT_H, RGB565_BLACK);
+void drawGauge(const Reading &reading, bool valid, bool fullRedraw) {
+  static size_t lastValueLen = 0;
   updateGaugeIndicator(reading, valid);
 
   int displayValue = reading.value;
@@ -230,10 +231,6 @@ void drawGauge(const Reading &reading, bool valid) {
     displayValue = static_cast<int>(lroundf(reading.value * KMH_TO_MPH));
     displayUnit = " mph";
   }
-
-  tft->setTextColor(RGB565_WHITE);
-  tft->setTextSize(2);
-  gaugeCenterPrint(reading.label, GAUGE_LABEL_Y);
 
   char valueText[12];
   if (valid) {
@@ -246,13 +243,30 @@ void drawGauge(const Reading &reading, bool valid) {
   } else {
     snprintf(valueText, sizeof(valueText), "--");
   }
+
+  // Only the static label/unit need a full clear, and only when the selected
+  // gauge changes. Value updates overwrite text with a background color so
+  // nothing is blanked first, avoiding flicker.
+  if (fullRedraw) {
+    tft->fillRect(GAUGE_RECT_X, GAUGE_RECT_Y, GAUGE_RECT_W, GAUGE_RECT_H, RGB565_BLACK);
+    tft->setTextColor(RGB565_WHITE, RGB565_BLACK);
+    tft->setTextSize(2);
+    gaugeCenterPrint(reading.label, GAUGE_LABEL_Y);
+    if (displayUnit[0] != '\0') {
+      gaugeCenterPrint(displayUnit, GAUGE_UNIT_Y);
+    }
+    lastValueLen = 0;
+  }
+
+  const size_t valueLen = strlen(valueText);
+  if (valueLen != lastValueLen) {
+    // Width changed (e.g. 99 -> 100): clear just the value band.
+    tft->fillRect(GAUGE_RECT_X, GAUGE_VALUE_Y, GAUGE_RECT_W, 40, RGB565_BLACK);
+    lastValueLen = valueLen;
+  }
+  tft->setTextColor(RGB565_WHITE, RGB565_BLACK);
   tft->setTextSize(5);
   gaugeCenterPrint(valueText, GAUGE_VALUE_Y);
-
-  if (displayUnit[0] != '\0') {
-    tft->setTextSize(2);
-    gaugeCenterPrint(displayUnit, GAUGE_UNIT_Y);
-  }
 }
 
 void updateGauge(uint32_t now) {
@@ -268,7 +282,7 @@ void updateGauge(uint32_t now) {
     return;
   }
 
-  drawGauge(reading, valid);
+  drawGauge(reading, valid, gaugeReadingIndex != lastGaugeIndex);
   lastGaugeIndex = gaugeReadingIndex;
   lastGaugeValid = valid;
   lastGaugeValue = reading.value;
