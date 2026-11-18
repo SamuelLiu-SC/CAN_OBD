@@ -43,6 +43,9 @@ constexpr float GAUGE_SWEEP_START_DEG = 135.0f;
 constexpr float GAUGE_SWEEP_DEG = 270.0f;
 constexpr float PI_F = 3.14159265f;
 constexpr float KMH_TO_MPH = 0.621371f;
+constexpr uint32_t GAUGE_ANIM_FRAME_MS = 20;
+constexpr float GAUGE_ANIM_EASE = 0.25f;
+constexpr float GAUGE_ANIM_MIN_STEP = 0.004f;
 constexpr uint8_t GAUGE_BUTTON_PIN = 8;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 
@@ -105,6 +108,9 @@ bool lastGaugeValid = false;
 int16_t lastIndicatorX = 0;
 int16_t lastIndicatorY = 0;
 bool gaugeIndicatorDrawn = false;
+float gaugeShownFraction = 0.0f;
+float gaugeTargetFraction = 0.0f;
+bool gaugeTargetValid = false;
 
 void printLine(uint8_t row, const char *text) {
   lcd.setCursor(0, row);
@@ -199,25 +205,61 @@ float gaugeFraction(const Reading &reading) {
   return fraction < 0.0f ? 0.0f : (fraction > 1.0f ? 1.0f : fraction);
 }
 
+// The indicator eases toward its target a little each frame instead of
+// jumping, so it glides between the 500 ms readings.
 void updateGaugeIndicator(const Reading &reading, bool valid) {
-  if (gaugeIndicatorDrawn) {
-    tft->fillCircle(lastIndicatorX, lastIndicatorY,
-                    GAUGE_INDICATOR_DOT_RADIUS, RGB565_BLACK);
-    gaugeIndicatorDrawn = false;
+  gaugeTargetValid = valid;
+  if (valid) {
+    gaugeTargetFraction = gaugeFraction(reading);
   }
-  if (!valid) {
+}
+
+void animateGaugeIndicator(uint32_t now) {
+  static uint32_t lastFrameAt = 0;
+  if (!tftReady || now - lastFrameAt < GAUGE_ANIM_FRAME_MS) {
+    return;
+  }
+  lastFrameAt = now;
+
+  if (!gaugeTargetValid) {
+    if (gaugeIndicatorDrawn) {
+      tft->fillCircle(lastIndicatorX, lastIndicatorY,
+                      GAUGE_INDICATOR_DOT_RADIUS, RGB565_BLACK);
+      drawGaugeScale();
+      gaugeIndicatorDrawn = false;
+    }
     return;
   }
 
+  float delta = gaugeTargetFraction - gaugeShownFraction;
+  if (gaugeIndicatorDrawn && fabsf(delta) < 0.0005f) {
+    return;
+  }
+  if (fabsf(delta) < GAUGE_ANIM_MIN_STEP) {
+    gaugeShownFraction = gaugeTargetFraction;
+  } else {
+    gaugeShownFraction += delta * GAUGE_ANIM_EASE;
+  }
+
   const float angle =
-      (GAUGE_SWEEP_START_DEG + gaugeFraction(reading) * GAUGE_SWEEP_DEG) *
+      (GAUGE_SWEEP_START_DEG + gaugeShownFraction * GAUGE_SWEEP_DEG) *
       PI_F / 180.0f;
-  lastIndicatorX = GAUGE_CENTER_X +
+  const int16_t x = GAUGE_CENTER_X +
       static_cast<int16_t>(lroundf(cosf(angle) * GAUGE_INDICATOR_RADIUS));
-  lastIndicatorY = GAUGE_CENTER_Y +
+  const int16_t y = GAUGE_CENTER_Y +
       static_cast<int16_t>(lroundf(sinf(angle) * GAUGE_INDICATOR_RADIUS));
-  tft->fillCircle(lastIndicatorX, lastIndicatorY,
-                  GAUGE_INDICATOR_DOT_RADIUS, RGB565_RED);
+  if (gaugeIndicatorDrawn && x == lastIndicatorX && y == lastIndicatorY) {
+    return;
+  }
+
+  if (gaugeIndicatorDrawn) {
+    tft->fillCircle(lastIndicatorX, lastIndicatorY,
+                    GAUGE_INDICATOR_DOT_RADIUS, RGB565_BLACK);
+    drawGaugeScale();
+  }
+  lastIndicatorX = x;
+  lastIndicatorY = y;
+  tft->fillCircle(x, y, GAUGE_INDICATOR_DOT_RADIUS, RGB565_RED);
   gaugeIndicatorDrawn = true;
 }
 
@@ -453,6 +495,8 @@ void loop() {
     lastScrollAt = now;
     topRow = (topRow + 1) % READING_COUNT;
   }
+
+  animateGaugeIndicator(now);
 
   static uint32_t lastDisplayAt = 0;
   if (now - lastDisplayAt >= 250) {
