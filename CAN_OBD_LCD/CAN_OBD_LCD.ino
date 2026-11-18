@@ -7,7 +7,7 @@
 
 hd44780_I2Cexp lcd;
 
-// GC9A01 240x240 round TFT, driven over software SPI (D2-D7 are not the
+// GC9A01 240x240 round TFT, driven over software SPI (D2-D7 are the
 // board's hardware SPI pins).
 //   SCL (SCK)  -> D7     RES (RST) -> D5     CS  -> D3
 //   SDA (MOSI) -> D6     DC        -> D4     BLK -> D2
@@ -48,6 +48,7 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 constexpr uint32_t REQUEST_ID = 0x7DF;
 constexpr uint8_t PID_RPM = 0x0C;
 constexpr uint8_t PID_RUNTIME = 0x1F;
+constexpr uint32_t GAUGE_POLL_INTERVAL_MS = 500;
 constexpr uint32_t POLL_INTERVAL_MS = 1000;
 constexpr uint32_t RESPONSE_TIMEOUT_MS = 750;
 constexpr uint32_t VALUE_TIMEOUT_MS = 15000;
@@ -90,6 +91,7 @@ size_t topRow = 0;
 size_t gaugeReadingIndex = 3;
 uint32_t requestAt = 0;
 uint32_t lastPollAt = 0;
+uint32_t lastGaugePollAt = 0;
 bool awaitingResponse = false;
 bool txError = false;
 
@@ -396,8 +398,10 @@ void setup() {
     }
   }
 
-  // Send the first request immediately, including when millis() is near zero.
-  lastPollAt = millis() - POLL_INTERVAL_MS;
+  // Start both schedules immediately, including when millis() is near zero.
+  const uint32_t now = millis();
+  lastPollAt = now - POLL_INTERVAL_MS;
+  lastGaugePollAt = now - GAUGE_POLL_INTERVAL_MS;
 }
 
 void loop() {
@@ -418,8 +422,14 @@ void loop() {
     awaitingResponse = false;
   }
 
-  if (!awaitingResponse && now - lastPollAt >= POLL_INTERVAL_MS) {
+  if (!awaitingResponse && now - lastGaugePollAt >= GAUGE_POLL_INTERVAL_MS) {
+    lastGaugePollAt = now;
+    requestPid(gaugeReadingIndex, now);
+  } else if (!awaitingResponse && now - lastPollAt >= POLL_INTERVAL_MS) {
     lastPollAt = now;
+    while (nextReading == gaugeReadingIndex) {
+      nextReading = (nextReading + 1) % READING_COUNT;
+    }
     requestPid(nextReading, now);
     nextReading = (nextReading + 1) % READING_COUNT;
   }
