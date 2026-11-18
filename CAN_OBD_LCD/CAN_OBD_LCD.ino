@@ -41,11 +41,13 @@ constexpr int16_t GAUGE_INDICATOR_DOT_RADIUS = 5;
 constexpr float GAUGE_SWEEP_START_DEG = 135.0f;
 constexpr float GAUGE_SWEEP_DEG = 270.0f;
 constexpr float PI_F = 3.14159265f;
+constexpr float KMH_TO_MPH = 0.621371f;
 constexpr uint8_t GAUGE_BUTTON_PIN = 8;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 
 constexpr uint32_t REQUEST_ID = 0x7DF;
 constexpr uint8_t PID_RPM = 0x0C;
+constexpr uint8_t PID_RUNTIME = 0x1F;
 constexpr uint32_t POLL_INTERVAL_MS = 1000;
 constexpr uint32_t RESPONSE_TIMEOUT_MS = 750;
 constexpr uint32_t VALUE_TIMEOUT_MS = 15000;
@@ -53,6 +55,8 @@ constexpr uint32_t SCROLL_INTERVAL_MS = 2000;
 
 enum class ValueFormat {
   Rpm,
+  AirFlow,
+  Runtime,
   Speed,
   Temperature,
   Percent
@@ -70,6 +74,8 @@ struct Reading {
 
 Reading readings[] = {
   {PID_RPM, "RPM", "", ValueFormat::Rpm, 0, 0, false},
+  {0x10, "MAF", " g/s", ValueFormat::AirFlow, 0, 0, false},
+  {PID_RUNTIME, "Runtime", " s", ValueFormat::Runtime, 0, 0, false},
   {0x0D, "Speed", " km/h", ValueFormat::Speed, 0, 0, false},
   {0x05, "Coolant", " C", ValueFormat::Temperature, 0, 0, false},
   {0x04, "Load", "%", ValueFormat::Percent, 0, 0, false},
@@ -81,7 +87,7 @@ constexpr size_t READING_COUNT = sizeof(readings) / sizeof(readings[0]);
 size_t nextReading = 0;
 size_t pendingReading = 0;
 size_t topRow = 0;
-size_t gaugeReadingIndex = 0;
+size_t gaugeReadingIndex = 3;
 uint32_t requestAt = 0;
 uint32_t lastPollAt = 0;
 bool awaitingResponse = false;
@@ -118,8 +124,13 @@ void refreshDisplay(uint32_t now) {
     const Reading &reading = readings[(topRow + row) % READING_COUNT];
     char line[17];
     if (reading.valid && now - reading.updatedAt <= VALUE_TIMEOUT_MS) {
-      snprintf(line, sizeof(line), "%s: %d%s", reading.label, reading.value,
-               reading.unit);
+      if (reading.format == ValueFormat::AirFlow) {
+        snprintf(line, sizeof(line), "%s: %d.%02d%s", reading.label,
+                 reading.value / 100, reading.value % 100, reading.unit);
+      } else {
+        snprintf(line, sizeof(line), "%s: %d%s", reading.label, reading.value,
+                 reading.unit);
+      }
     } else {
       snprintf(line, sizeof(line), "%s: --%s", reading.label, reading.unit);
     }
@@ -159,6 +170,14 @@ float gaugeFraction(const Reading &reading) {
     case ValueFormat::Rpm:
       minimum = 0.0f;
       maximum = 8000.0f;
+      break;
+    case ValueFormat::AirFlow:
+      minimum = 0.0f;
+      maximum = 65535.0f;
+      break;
+    case ValueFormat::Runtime:
+      minimum = 0.0f;
+      maximum = 65535.0f;
       break;
     case ValueFormat::Speed:
       minimum = 0.0f;
@@ -203,22 +222,34 @@ void drawGauge(const Reading &reading, bool valid) {
   tft->fillRect(GAUGE_RECT_X, GAUGE_RECT_Y, GAUGE_RECT_W, GAUGE_RECT_H, RGB565_BLACK);
   updateGaugeIndicator(reading, valid);
 
+  int displayValue = reading.value;
+  const char *displayUnit = reading.unit;
+  if (reading.format == ValueFormat::Speed) {
+    displayValue = static_cast<int>(lroundf(reading.value * KMH_TO_MPH));
+    displayUnit = " mph";
+  }
+
   tft->setTextColor(RGB565_WHITE);
   tft->setTextSize(2);
   gaugeCenterPrint(reading.label, GAUGE_LABEL_Y);
 
   char valueText[12];
   if (valid) {
-    snprintf(valueText, sizeof(valueText), "%d", reading.value);
+    if (reading.format == ValueFormat::AirFlow) {
+      snprintf(valueText, sizeof(valueText), "%d.%02d", reading.value / 100,
+               reading.value % 100);
+    } else {
+      snprintf(valueText, sizeof(valueText), "%d", displayValue);
+    }
   } else {
     snprintf(valueText, sizeof(valueText), "--");
   }
   tft->setTextSize(5);
   gaugeCenterPrint(valueText, GAUGE_VALUE_Y);
 
-  if (reading.unit[0] != '\0') {
+  if (displayUnit[0] != '\0') {
     tft->setTextSize(2);
-    gaugeCenterPrint(reading.unit, GAUGE_UNIT_Y);
+    gaugeCenterPrint(displayUnit, GAUGE_UNIT_Y);
   }
 }
 
@@ -299,6 +330,20 @@ void processResponse(const CanMsg &message, uint32_t now) {
       }
       reading.value = (static_cast<unsigned int>(message.data[3]) * 256U +
                        message.data[4]) / 4U;
+      break;
+    case ValueFormat::AirFlow:
+      if (payloadLength < 4) {
+        return;
+      }
+      reading.value = static_cast<unsigned int>(message.data[3]) * 256U +
+                      message.data[4];
+      break;
+    case ValueFormat::Runtime:
+      if (payloadLength < 4) {
+        return;
+      }
+      reading.value = static_cast<unsigned int>(message.data[3]) * 256U +
+                      message.data[4];
       break;
     case ValueFormat::Speed:
       reading.value = message.data[3];
